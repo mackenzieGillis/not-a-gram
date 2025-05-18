@@ -106,10 +106,11 @@ class WireframeRenderer:
 class HeadTracker:
     def __init__(self):
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        self.profile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
         self.cap = cv2.VideoCapture(0)
         self.last_angle_x = 0
         self.last_angle_y = 0
-        self.MIN_FACE_SIZE = 100
+        self.MIN_FACE_SIZE = 200
         self.REAL_FACE_WIDTH = 16.0
         self.FOCAL_LENGTH = 500.0
         self.MAX_ANGLE = math.pi / 2
@@ -122,7 +123,15 @@ class HeadTracker:
             return self.last_angle_x, self.last_angle_y, frame, False
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Try frontal face detection first
         faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+
+        # If no frontal face, try profile face
+        if len(faces) == 0:
+            faces = self.profile_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+
+        # Filter small detections
         faces = [f for f in faces if f[2] > self.MIN_FACE_SIZE and f[3] > self.MIN_FACE_SIZE]
 
         if len(faces) > 0:
@@ -145,6 +154,7 @@ class HeadTracker:
     def release(self):
         self.cap.release()
         cv2.destroyAllWindows()
+
 
 # ----------------------------
 # App: Runs everything
