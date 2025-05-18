@@ -17,6 +17,10 @@ eggs/
 lib/
 lib64/
 parts/
+gen_ant.py
+.DS_store
+models/
+venv/
 sdist/
 var/
 wheels/
