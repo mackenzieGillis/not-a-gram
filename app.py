@@ -70,7 +70,7 @@ class WireframeRenderer:
 
         # Glowing pulse effect
         t = pygame.time.get_ticks() * 0.005
-        glow_intensity = 180 + int(50 * math.sin(t))
+        glow_intensity = 180 + int(50 )#* math.sin(t))
         glow_color = (0, glow_intensity, 180)
         core_color = (0, 255, 255)
 
@@ -88,16 +88,16 @@ class WireframeRenderer:
             pygame.draw.line(screen, (0, 255, 80), (p1_proj[0] + offset, p1_proj[1]), (p2_proj[0] + offset, p2_proj[1]), 2)
 
             # Glow layers
-            pygame.draw.line(screen, glow_color, p1_proj, p2_proj, 5)
             pygame.draw.line(screen, glow_color, p1_proj, p2_proj, 3)
+            pygame.draw.line(screen, glow_color, p1_proj, p2_proj, 2)
 
             # Core line
             pygame.draw.line(screen, core_color, p1_proj, p2_proj, 1)
 
         # Animated scanlines
-        scan_offset = int((pygame.time.get_ticks() * 0.1) % 4)
-        for y in range(scan_offset, self.height, 4):
-            pygame.draw.line(screen, (0, 40, 40), (0, y), (self.width, y), 1)
+        # scan_offset = int((pygame.time.get_ticks() * 0.1) % 4)
+        # for y in range(scan_offset, self.height, 4):
+        #     pygame.draw.line(screen, (0, 40, 40), (0, y), (self.width, y), 1)
 
 
 # ----------------------------
@@ -110,45 +110,88 @@ class HeadTracker:
         self.cap = cv2.VideoCapture(0)
         self.last_angle_x = 0
         self.last_angle_y = 0
+        self.last_x = 0
+        self.last_y = 0
         self.MIN_FACE_SIZE = 200
         self.REAL_FACE_WIDTH = 16.0
         self.FOCAL_LENGTH = 500.0
         self.MAX_ANGLE = math.pi / 2
-        self.NEAR_DIST = 30
-        self.FAR_DIST = 80
+        self.NEAR_DIST = 5
+        self.FAR_DIST = 30
+        self.last_w = None
 
     def get_angles(self):
         ret, frame = self.cap.read()
         if not ret:
             return self.last_angle_x, self.last_angle_y, frame, False
 
+        # Flip the frame horizontally to create a mirror effect
+        frame = cv2.flip(frame, 1)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Try frontal face detection first
+        
+        # Cascade classifiers for face detection
         faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-
-        # If no frontal face, try profile face
         if len(faces) == 0:
             faces = self.profile_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
 
-        # Filter small detections
         faces = [f for f in faces if f[2] > self.MIN_FACE_SIZE and f[3] > self.MIN_FACE_SIZE]
 
         if len(faces) > 0:
             (x, y, w, h) = faces[0]
-            cx, cy = x + w / 2, y + h / 2
-            distance_cm = (self.REAL_FACE_WIDTH * self.FOCAL_LENGTH) / w
-            offset_x = (cx / frame.shape[1]) - 0.5
-            offset_y = 0.5 - (cy / frame.shape[0])
-            scale = (max(self.NEAR_DIST, min(self.FAR_DIST, distance_cm)) - self.NEAR_DIST) / (self.FAR_DIST - self.NEAR_DIST)
-            max_angle = (1 - scale) * self.MAX_ANGLE
+            
+            # Smooth the face width to prevent distance jitter
+            # helps keep the stl render from freaking out
+            if self.last_w is None:
+                self.last_w = w
+            else:
+                self.last_w = self.last_w * 0.9 + w * 0.1 
 
-            angle_y = -offset_x * max_angle
-            angle_x = -offset_y * max_angle
-            self.last_angle_x, self.last_angle_y = angle_x, angle_y
+            # Calculate distance based on the new, smoothed width
+            distance_cm = (self.REAL_FACE_WIDTH * self.FOCAL_LENGTH) / self.last_w
+            
+            # Calculate the center of the face in pixel coordinates
+            cx = x + w / 2
+            cy = y + h / 2
+
+            # Calculate the horizontal and vertical pixel offset from the screen center
+            screen_center_x = frame.shape[1] / 2
+            screen_center_y = frame.shape[0] / 2
+            
+            # Use a small dead zone to ignore minor jitters
+            dead_zone_x = 20 # pixels
+            dead_zone_y = 20 # pixels
+            
+            pixel_offset_x = cx - screen_center_x
+            pixel_offset_y = screen_center_y - cy
+
+            if abs(pixel_offset_x) < dead_zone_x:
+                pixel_offset_x = 0 
+            if abs(pixel_offset_y) < dead_zone_y:
+                pixel_offset_y = 0
+                
+            real_world_offset_x = pixel_offset_x * distance_cm / self.FOCAL_LENGTH
+            real_world_offset_y = pixel_offset_y * distance_cm / self.FOCAL_LENGTH
+
+            # Calculate the rotation angles using atan (parallax effect), but
+            # scale it because it's still too much for some reason
+            target_angle_y = .5 * math.atan(real_world_offset_x / distance_cm)
+            target_angle_x = .5 * math.atan(real_world_offset_y / distance_cm)
+            
+            # To make the object follow the face, we should be rotating in the
+            # opposite direction.
+            # target_angle_y = -math.atan(pixel_offset_x / self.FOCAL_LENGTH)
+            # target_angle_x = -math.atan(pixel_offset_y / self.FOCAL_LENGTH)
+
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            return angle_x, angle_y, frame, True
+            
+            # Return the stable target angles, not the unstable deltas
+            self.last_angle_x = target_angle_x
+            self.last_angle_y = target_angle_y
+            
+            return target_angle_x, target_angle_y, frame, True
 
+        # If no face is detected, we should return the last known good angles
+        # and not update them to 0, so that the model 'freezes' in place
         return self.last_angle_x, self.last_angle_y, frame, False
 
     def release(self):
@@ -166,7 +209,7 @@ class App:
         self.screen = pygame.display.set_mode((self.WIDTH, self.HEIGHT))
         self.clock = pygame.time.Clock()
 
-        filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "cube.stl")
+        filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "queen.stl")
         if not os.path.isfile(filepath):
             print("❌ STL file not found:", filepath)
             sys.exit(1)
@@ -188,10 +231,9 @@ class App:
                     running = False
 
             target_angle_x, target_angle_y, frame, face_visible = self.tracker.get_angles()
-
             # If face was just reacquired, enter slow smoothing mode for a few frames
             if face_visible and not face_visible_prev:
-                slow_smoothing_frames = 15  # adjust duration of glide here
+                slow_smoothing_frames = 25  # adjust duration of glide here
 
             if face_visible:
                 if slow_smoothing_frames > 0:
@@ -201,6 +243,7 @@ class App:
                     smoothing = 0.5  # fast tracking once aligned
             else:
                 smoothing = 0.05  # slowly glide to last known target
+
 
             angle_x += smoothing * (target_angle_x - angle_x)
             angle_y += smoothing * (target_angle_y - angle_y)
